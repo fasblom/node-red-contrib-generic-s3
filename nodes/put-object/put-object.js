@@ -49,115 +49,63 @@ function inputHandler(n, RED) {
     } = require("../../common/common");
     const crypto = require("crypto");
 
-    // msg object clone
-    let msgClone;
-    try {
-      msgClone = structuredClone(msg);
-    } catch (e) {
-      msg.error = e;
-      this.error(e, e);
+    let bucket = n.bucket ? n.bucket : msg.bucket;
+    if (!bucket) {
+      this.error("No bucket provided!");
       return;
     }
 
-    let bucket = n.bucket ? n.bucket : null;
-    // Checking for correct properties input
-    if (!bucket) {
-      bucket = msgClone.bucket ? msgClone.bucket : null;
-      if (!bucket) {
-        this.error("No bucket provided!");
-        return;
-      }
-    }
-
-    let key = n.key ? n.key : null;
+    let key = n.key ? n.key : msg.key;
     if (!key) {
-      key = msgClone.key ? msgClone.key : null;
-      if (!key) {
-        this.error("No object key provided!");
-        return;
-      }
+      this.error("No object key provided!");
+      return;
     }
 
-    let body = n.body ? n.body : null;
+    let body = n.body ? n.body : msg.body;
     if (!body) {
-      body = msgClone.body ? msgClone.body : null;
-      if (!body) {
-        this.error("No body data provided to put in the object!");
-        return;
-      }
+      this.error("No body data provided to put in the object!");
+      return;
     }
 
-    let stream = n.stream ? n.stream : null;
-    if (!stream) {
-      stream = msgClone.stream ? msgClone.stream : null;
-    }
+    let stream = n.stream ? n.stream : msg.stream;
 
-    // If the body is not a string
-    // but neither a stream is expected, the body
-    //  should be formatted as string
     if (!isString(body) && !stream) {
       this.error("The body should be formatted as string!");
       return;
     }
 
-    let contentType = n.contentType ? n.contentType : null;
+    let contentType = n.contentType ? n.contentType : msg.contentType;
     if (!contentType) {
-      contentType = msgClone.contentType ? msgClone.contentType : null;
-      if (!contentType) {
-        this.error("No Content-Type provided!");
-        return;
-      }
+      this.error("No Content-Type provided!");
+      return;
     }
 
-    let metadata = n.metadata ? n.metadata : null;
-    if (!metadata) {
-      metadata = msgClone.metadata ? msgClone.metadata : null;
+    let metadata = n.metadata ? n.metadata : msg.metadata;
+    if (metadata && !isObject(metadata) && !isJsonString(metadata)) {
+      this.error("The metadata should be of type Object!");
+      return;
     }
 
-    if (metadata) {
-      if (!isJsonString(metadata)) {
-        if (!isObject(metadata)) {
-          this.error("The metadata should be of type Object!");
-          return;
-        }
-      }
-
-      if (!isObject(metadata)) {
-        metadata = JSON.parse(metadata);
-      }
+    if (!isObject(metadata) && metadata) {
+      metadata = JSON.parse(metadata);
     }
 
-    let upsert = n.upsert ? n.upsert : false;
-    if (!upsert) {
-      upsert = msgClone.upsert ? msgClone.upsert : false;
-    }
+    let upsert = n.upsert ? n.upsert : msg.upsert;
 
-    // ContentEncoding parameter
-    let contentencoding = n.contentencoding ? n.contentencoding : false;
-    if (!contentencoding) {
-      contentencoding = msgClone.contentencoding
-        ? msgClone.contentencoding
-        : null;
-    }
+    let contentencoding = n.contentencoding ? n.contentencoding : msg.contentencoding;
     if (contentencoding && !isValidContentEncoding(contentencoding)) {
       this.error("Invalid content encoding!");
       return;
     }
 
-    // ACL parameter
-    let acl = n.acl ? n.acl : null;
-    if (!acl) {
-      acl = msgClone.acl ? msgClone.acl : null;
-    }
+    let acl = n.acl ? n.acl : msg.acl;
     if (acl && !isValidACL(acl)) {
       this.error("Invalid ACL permissions value");
       return;
     }
 
-    // S3 client init
     let s3Client = null;
     try {
-      // Creating S3 client
       s3Client = new S3({
         endpoint: n.conf.endpoint,
         forcePathStyle: n.conf.forcepathstyle,
@@ -170,159 +118,36 @@ function inputHandler(n, RED) {
 
       this.status({ fill: "blue", shape: "dot", text: "Uploading" });
 
-      let bodyToUpload = body;
-
-      // Body is stream check,
-      // if it isn't then streamify the body
-      if (!stream) {
-        // Converting body from string to stream
-        // since the sdk requires stream for upload
-        bodyToUpload = stringToStream(body);
-        if (!bodyToUpload) {
-          throw new Error(
-            "Failed to streamify body. Body needs to be a string!"
-          );
-        }
+      let bodyToUpload = stream ? body : stringToStream(body);
+      if (!bodyToUpload) {
+        throw new Error("Failed to streamify body. Body needs to be a string!");
       }
 
-      if (upsert) {
-        const MD5 = crypto.createHash("md5").update(body).digest("hex");
-        let headInformation = null;
-        try {
-          headInformation = await s3Client.headObject({
-            Bucket: bucket,
-            Key: key,
-          });
-        } catch (err) {}
+      const objectToCreate = {
+        Bucket: bucket,
+        Key: key,
+        ContentType: contentType,
+        Body: bodyToUpload,
+        ContentEncoding: contentencoding,
+        ACL: acl,
+        Metadata: metadata,
+      };
 
-        // Object does not exist
-        if (!headInformation) {
-          const objectToCreate = {
-            Bucket: bucket,
-            Key: key,
-            ContentType: contentType,
-            Body: bodyToUpload,
-            ContentEncoding: contentencoding,
-            ACL: acl,
-          };
+      const result = await s3Client.putObject(objectToCreate);
 
-          if (metadata) objectToCreate.Metadata = metadata;
+      msg.payload = result; // Replace the payload with the result
+      msg.key = key; // Append the object key to the message
 
-          // Uploading
-          this.status({
-            fill: "blue",
-            shape: "dot",
-            text: "Uploading",
-          });
-
-          const result = await s3Client.putObject(objectToCreate);
-          // Replace the payload with
-          // the returned data
-          msgClone.payload = result;
-          // Append the object
-          // key to the message object
-          msgClone.key = key;
-
-          // Return the complete message object
-          send(msgClone);
-          this.status({ fill: "green", shape: "dot", text: "Success" });
-        } else {
-          let ETag = headInformation.ETag.substring(
-            1,
-            headInformation.ETag.length - 1
-          ); // Formatting the ETag
-          if (ETag == MD5) {
-            this.warn(
-              `The object ${key} has not been upserted since the body of the existing object is exactly the same`
-            );
-            // Replace the payload with null
-            msgClone.payload = null;
-            // Append the object
-            // key to the message object
-            msgClone.key = key;
-
-            // Return the complete message object
-            send(msgClone);
-            this.status({ fill: "green", shape: "dot", text: "Success" });
-          } else {
-            const objectToCreate = {
-              Bucket: bucket,
-              Key: key,
-              ContentType: contentType,
-              Body: bodyToUpload,
-              ContentEncoding: contentencoding,
-              ACL: acl,
-            };
-
-            if (metadata) objectToCreate.Metadata = metadata;
-
-            // Uploading
-            this.status({
-              fill: "blue",
-              shape: "dot",
-              text: "Uploading",
-            });
-
-            const result = await s3Client.putObject(objectToCreate);
-            // Replace the payload with
-            // the returned data
-            msgClone.payload = result;
-            // Append the object
-            // key to the message object
-            msgClone.key = key;
-
-            // Return the complete message object
-            send(msgClone);
-            this.status({ fill: "green", shape: "dot", text: "Success" });
-          }
-        }
-      } else {
-        const objectToCreate = {
-          Bucket: bucket,
-          Key: key,
-          ContentType: contentType,
-          Body: bodyToUpload,
-          ContentEncoding: contentencoding,
-          ACL: acl,
-        };
-
-        if (metadata) objectToCreate.Metadata = metadata;
-
-        // Uploading
-        this.status({
-          fill: "blue",
-          shape: "dot",
-          text: "Uploading",
-        });
-
-        const result = await s3Client.putObject(objectToCreate);
-        // Replace the payload with
-        // the returned data
-        msgClone.payload = result;
-        // Append the object
-        // key to the message object
-        msgClone.key = key;
-
-        // Return the complete message object
-        send(msgClone);
-        this.status({ fill: "green", shape: "dot", text: "Success" });
-      }
+      send(msg);
+      this.status({ fill: "green", shape: "dot", text: "Success" });
     } catch (err) {
-      // If error occurs
       this.status({ fill: "red", shape: "dot", text: "Failure" });
-      // Replace the payload with null
-      msgClone.payload = null;
-      msgClone.error = err;
-      // Append the bucket
-      // to the message object
-      msgClone.key = key;
-      this.error(err, msgClone);
-      send(msgClone);
+      msg.payload = null; // Clear payload on error
+      msg.error = err;
+      this.error(err, msg);
+      send(msg);
     } finally {
       if (s3Client) s3Client.destroy();
-      /* Dereference vars */
-      s3Client = null;
-      /*********************/
       setTimeout(() => {
         this.status({});
       }, 3000);
@@ -330,3 +155,4 @@ function inputHandler(n, RED) {
     }
   };
 }
+
